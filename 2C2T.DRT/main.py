@@ -1,5 +1,5 @@
 """
-2C2T.DRT - CPU Can Train Too (Dream Reality Technologies)
+2C2T.DRT
 =========================================================
 Train neural networks of ANY size on CPU,
 with automatic sharding, multi-core parallelism,
@@ -144,7 +144,7 @@ def build_model(model_type="mlp"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="2C2T.DRT - CPU Can Train Too")
+    parser = argparse.ArgumentParser(description="2C2T.DRT")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.001)
@@ -169,7 +169,7 @@ def main():
         set_num_threads(args.threads)
 
     print("=" * 68)
-    print("  2C2T.DRT - CPU Can Train Too (Dream Reality Technologies)")
+    print("  2C2T.DRT")
     print("  Deep Learning for CPU : models of ANY size")
     print("=" * 68)
     print(f"  CPU cores: {cpu_count()} | Threads: {args.threads or 'auto'}")

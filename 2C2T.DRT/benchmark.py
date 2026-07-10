@@ -66,7 +66,6 @@ def benchmark_step(model, batch_size, n_steps=5):
 
 print("=" * 70)
 print("  2C2T.DRT - HONEST BENCHMARK")
-print("  CPU Can Train Too (Dream Reality Technologies)")
 print("=" * 70)
 
 cpu_count = 0

@@ -1,4 +1,4 @@
-# 2C2T.DRT — CPU Can Train Too
+# 2C2T.DRT
 
 Train neural networks on CPU. No GPU required.
 

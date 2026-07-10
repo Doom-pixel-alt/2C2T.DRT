@@ -21,4 +21,3 @@ from . import storage
 
 __version__ = "2.0.0"
 __title__ = "2C2T.DRT"
-__description__ = "CPU Can Train Too - Deep Learning for Any Model Size"

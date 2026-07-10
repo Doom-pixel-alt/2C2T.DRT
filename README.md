@@ -2,7 +2,7 @@
 
 # 2C2T.DRT
 
-**CPU Can Train Too** — *Dream Reality Technologies*
+**2C2T.DRT**
 
 *Train neural networks on CPU. No GPU. No budget. No bullshit.*
 
@@ -222,4 +222,4 @@ python benchmark.py
 
 MIT — do whatever you want. Improve it, fork it, distribute it.
 
-Dream Reality Technologies — *because everyone deserves to train AI.*
+
