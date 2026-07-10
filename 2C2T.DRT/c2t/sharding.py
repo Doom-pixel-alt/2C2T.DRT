@@ -82,7 +82,7 @@ class ShardedModel:
         if current_shard:
             self.shards.append(ModelShard(current_shard, len(self.shards)))
 
-        print(f"[Sharding] Modele divise en {len(self.shards)} shards "
+        print(f"[Sharding] Model split into {len(self.shards)} shards "
               f"(max {self.max_shard_size_mb} MB/shard)")
 
     def _save_shard(self, shard_id):
@@ -247,8 +247,8 @@ def auto_shard_model(model, memory_limit_mb=None, model_size_mb=None):
         return model
 
     max_shard = max(64, int(memory_limit_mb * 0.3))
-    print(f"[AutoShard] Modele {model_size_mb:.0f}MB, RAM dispo ~{memory_limit_mb:.0f}MB")
-    print(f"[AutoShard] Sharding en blocs de {max_shard}MB...")
+    print(f"[AutoShard] Model {model_size_mb:.0f}MB, RAM available ~{memory_limit_mb:.0f}MB")
+    print(f"[AutoShard] Sharding into {max_shard}MB blocks...")
     return ShardedModel(model, max_shard_size_mb=max_shard)
 
 

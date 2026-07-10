@@ -130,7 +130,7 @@ class Trainer:
             sample = next(iter(train_loader))[0][0].shape
             suggested = suggest_batch_size(self.model, sample)
             if suggested < train_loader.batch_size:
-                print(f"[AutoBatch] Batch size ajustee: {train_loader.batch_size} -> {suggested}")
+                print(f"[AutoBatch] Batch size adjusted: {train_loader.batch_size} -> {suggested}")
                 train_loader.batch_size = suggested
 
         early_stopping = EarlyStopping(patience=early_stopping_patience) if early_stopping_patience else None

@@ -1,9 +1,9 @@
 """
 2C2T.DRT - CPU Can Train Too (Dream Reality Technologies)
 =========================================================
-Entraine des reseaux de neurones de TOUTE taille sur CPU,
-avec sharding automatique, parallelisme multi-coeur,
-et optimisation memoire.
+Train neural networks of ANY size on CPU,
+with automatic sharding, multi-core parallelism,
+and memory optimization.
 
 Usage:
   python main.py
@@ -46,7 +46,7 @@ def load_or_generate_data():
     use_synthetic = False
 
     if not all_exist:
-        print("[Data] Téléchargement MNIST...")
+        print("[Data] Downloading MNIST...")
         urls = {
             "train_images": "https://yann.lecun.com/exdb/mnist/train-images-idx3-ubyte.gz",
             "train_labels": "https://yann.lecun.com/exdb/mnist/train-labels-idx1-ubyte.gz",
@@ -57,10 +57,10 @@ def load_or_generate_data():
             for key, url in urls.items():
                 print(f"  {os.path.basename(url)}")
                 urllib.request.urlretrieve(url, paths[key])
-            print("[OK] MNIST téléchargé")
+            print("[OK] MNIST downloaded")
         except Exception as e:
-            print(f"[!] Téléchargement impossible: {e}")
-            print("[Data] Generation de donnees synthetiques")
+            print(f"[!] Download failed: {e}")
+            print("[Data] Generating synthetic data")
             use_synthetic = True
 
     if use_synthetic:
@@ -69,7 +69,7 @@ def load_or_generate_data():
         y_train = np.random.randint(0, 10, size=n_train).astype(np.intp)
         x_test  = np.random.randn(n_test, 1, 28, 28).astype(np.float32)
         y_test  = np.random.randint(0, 10, size=n_test).astype(np.intp)
-        print(f"  Synthetique: {n_train} train + {n_test} test")
+        print(f"  Synthetic: {n_train} train + {n_test} test")
         return (x_train, y_train), (x_test, y_test)
 
     def read_images(path, num=None):
@@ -154,9 +154,9 @@ def main():
     parser.add_argument("--early-stop", type=int, default=0)
     parser.add_argument("--val-split", type=float, default=0.1)
     parser.add_argument("--threads", type=int, default=0)
-    parser.add_argument("--shard", action="store_true", help="activer le sharding memoire")
-    parser.add_argument("--shard-size", type=int, default=200, help="taille max par shard (MB)")
-    parser.add_argument("--auto-batch", action="store_true", help="batch size auto")
+    parser.add_argument("--shard", action="store_true", help="enable memory sharding")
+    parser.add_argument("--shard-size", type=int, default=200, help="max shard size (MB)")
+    parser.add_argument("--auto-batch", action="store_true", help="auto batch sizing")
     parser.add_argument("--save", type=str, default=None)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--load", type=str, default=None)
@@ -170,16 +170,16 @@ def main():
 
     print("=" * 68)
     print("  2C2T.DRT - CPU Can Train Too (Dream Reality Technologies)")
-    print("  Deep Learning pour CPU : models de TOUTE taille")
+    print("  Deep Learning for CPU : models of ANY size")
     print("=" * 68)
     print(f"  CPU cores: {cpu_count()} | Threads: {args.threads or 'auto'}")
-    print(f"  RAM dispo: {get_available_memory_mb():.0f} MB")
+    print(f"  RAM available: {get_available_memory_mb():.0f} MB")
     print(f"  Model: {args.model} | Optimizer: {args.optimizer} | LR: {args.lr}")
     print(f"  Batch: {args.batch_size} | Grad accum: {args.grad_accum}")
     print(f"  Sharding: {'ON (' + str(args.shard_size) + 'MB/shard)' if args.shard else 'OFF'}")
     print()
 
-    print("[1/5] Chargement des donnees...")
+    print("[1/5] Loading data...")
     (x_train_raw, y_train_raw), (x_test, y_test) = load_or_generate_data()
 
     val_size = int(len(x_train_raw) * args.val_split)
@@ -199,13 +199,13 @@ def main():
     val_loader   = DataLoader(val_data,   batch_size=args.batch_size, shuffle=False)
     test_loader  = DataLoader(test_data,  batch_size=args.batch_size, shuffle=False)
 
-    print(f"\n[3/5] Construction du modele {args.model}...")
+    print(f"\n[3/5] Building model {args.model}...")
     model = build_model(args.model)
 
     if args.load:
         state = np.load(args.load, allow_pickle=True)
         model.load_state_dict(state["model_state"].item())
-        print(f"  Modele charge depuis {args.load}")
+        print(f"  Model loaded from {args.load}")
 
     if args.shard:
         from c2t.sharding import ShardedModel
@@ -224,9 +224,9 @@ def main():
 
     trainer = c2t.Trainer(model, loss_fn, optimizer, verbose=True)
 
-    print(f"\n  Resume du modele:")
+    print(f"\n  Model summary:")
     total_params = trainer.summary()
-    print(f"  RAM estimee necessaire: ~{total_params * 4 * 4 / (1024**2):.0f} MB (params+grad+opt)")
+    print(f"  Estimated RAM needed: ~{total_params * 4 * 4 / (1024**2):.0f} MB (params+grad+opt)")
     print()
 
     if args.eval_only:
@@ -235,9 +235,9 @@ def main():
         print(f"  Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
         return
 
-    print(f"\n[4/5] Lancement de l'entrainement...")
-    print(f"  Sharding: {'Actif' if args.shard else 'Inactif'}")
-    print(f"  Auto-batch: {'Actif' if args.auto_batch else 'Inactif'}")
+    print(f"\n[4/5] Starting training...")
+    print(f"  Sharding: {'Active' if args.shard else 'Inactive'}")
+    print(f"  Auto-batch: {'Active' if args.auto_batch else 'Inactive'}")
     print()
 
     t_start = time.time()
@@ -258,9 +258,9 @@ def main():
 
     print()
     print("=" * 68)
-    print("  RESULTATS FINAUX")
+    print("  FINAL RESULTS")
     print("=" * 68)
-    print(f"  Temps total: {t_total:.1f}s ({t_total/60:.1f} min)")
+    print(f"  Total time: {t_total:.1f}s ({t_total/60:.1f} min)")
     print(f"  Epochs: {len(history['train_loss'])}")
 
     final_train_loss = history["train_loss"][-1]
@@ -273,19 +273,19 @@ def main():
               f"(epoch {best_val_idx + 1}) | "
               f"Val Acc: {history['val_acc'][best_val_idx]:.4f}")
 
-    print(f"\n[5/5] Evaluation finale...")
+    print(f"\n[5/5] Final evaluation...")
     test_loss, test_acc = trainer.evaluate(test_loader)
     print(f"  Test Loss: {test_loss:.4f} | Test Acc: {test_acc:.4f}")
 
     sample = x_test[0:4]
     preds = trainer.predict(sample)
     pred_classes = np.argmax(preds, axis=1)
-    print(f"\n  Inference exemple:")
+    print(f"\n  Inference example:")
     print(f"    Pred: {pred_classes.tolist()}")
     print(f"    True: {y_test[0:4].tolist()}")
 
     print()
-    print("  [OK] Entrainement 2C2T.DRT termine !")
+    print("  [OK] 2C2T.DRT training complete !")
     print("=" * 68)
 
 
