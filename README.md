@@ -47,7 +47,7 @@ It's slow compared to a GPU (15-30 seconds), but it **works on any PC**.
 
 ```bash
 git clone https://github.com/Doom-pixel-alt/2C2T.DRT.git
-cd 2C2T.DRT/2C2T.DRT
+cd 2C2T.DRT
 python main.py
 ```
 
@@ -198,7 +198,6 @@ python benchmark.py
 ## Project structure
 
 ```
-2C2T.DRT/
 ├── c2t/                        # Python package
 │   ├── __init__.py             # Public API
 │   ├── tensor.py               # Tensor with autograd
