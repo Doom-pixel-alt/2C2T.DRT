@@ -1,16 +1,16 @@
 """
-2C2T.DRT - Benchmark HONNETE
-=============================
-Teste uniquement ce qui marche VRAIMENT.
+2C2T.DRT - Honest Benchmark
+============================
+Only tests what actually WORKS.
 
-Ce que ce benchmark mesure :
-- Forward + Backward + Optimizer step pour des modeles qui tiennent en RAM
-- Throughput realiste en params/s et samples/s
-- Scaling du BLAS pour不同 tailles de matrices
+What this benchmark measures:
+- Forward + Backward + Optimizer step for RAM-fitting models
+- Realistic throughput in params/s and samples/s
+- BLAS scaling across matrix sizes
 
-Ce qu'il NE mesure PAS (car ca ne marche pas) :
-- Entrainement de modeles 100B+ en streaming (impossible sans GPU)
-- Inference de modeles plus grands que la RAM (possible mais pas benchmarke ici)
+What it does NOT measure (because it doesn't work):
+- Streaming training of 100B+ models (impossible without GPU)
+- Inference of disk-sized models (possible but not benchmarked here)
 """
 
 import sys, os, time, math
@@ -65,7 +65,7 @@ def benchmark_step(model, batch_size, n_steps=5):
 
 
 print("=" * 70)
-print("  2C2T.DRT - BENCHMARK HONNETE")
+print("  2C2T.DRT - HONEST BENCHMARK")
 print("  CPU Can Train Too (Dream Reality Technologies)")
 print("=" * 70)
 
@@ -77,25 +77,25 @@ except:
     cpu_count = 0
 
 import os as _os
-blas_threads = _os.environ.get("OPENBLAS_NUM_THREADS", "non defini")
+blas_threads = _os.environ.get("OPENBLAS_NUM_THREADS", "not set")
 
-print(f"\n  Machine: {cpu_count} CPUs logiques")
+print(f"\n  Machine: {cpu_count} logical CPUs")
 print(f"  BLAS threads: {blas_threads}")
-print(f"  Precision: float32 (tous les calculs)")
+print(f"  Precision: float32 (all operations)")
 print()
 
 print("-" * 70)
-print("  Benchmark 1: Forward + Backward + Adam step complets")
-print("  (Ce qui compte vraiment pour l'entrainement)")
+print("  Benchmark 1: Full Forward + Backward + Adam step")
+print("  (What actually matters for training)")
 print("-" * 70)
 
 configs = [
-    ("Modele miniature  (784-256-128-10)",  5,   64,   "Faible"),
-    ("Modele petit      (784-512-256-10)",   10,  64,   "Faible"),
-    ("Modele moyen      (784-1024-512-10)",  20,  32,   "Moyen"),
-    ("Modele large      (784-2048-1024-10)", 40,  16,   "Eleve"),
-    ("Modele tres large (784-4096-2048-10)", 80,  4,    "Eleve"),
-    ("Modele geant      (784-8192-4096-10)", 160, 2,    "Tres eleve"),
+    ("Tiny model      (784-256-128-10)",   5,   64,   "Low"),
+    ("Small model     (784-512-256-10)",   10,  64,   "Low"),
+    ("Medium model    (784-1024-512-10)",  20,  32,   "Medium"),
+    ("Large model     (784-2048-1024-10)", 40,  16,   "High"),
+    ("XLarge model    (784-4096-2048-10)", 80,  4,    "High"),
+    ("Giant model     (784-8192-4096-10)", 160, 2,    "Very high"),
 ]
 
 for name, d, batch, ram_level in configs:
@@ -105,24 +105,24 @@ for name, d, batch, ram_level in configs:
         est = estimate_model_size(model)
         r = benchmark_step(model, batch, n_steps=3)
         print(f"\n  {name}")
-        print(f"    Parametres:     {r['params']:>12,} ({r['size_mb']:.1f} MB)")
-        print(f"    Taille batch:   {batch}")
-        print(f"    Temps/step:     {r['step_ms']:>8.1f} ms")
-        print(f"    Samples/sec:    {r['samples_s']:>8.0f}")
-        print(f"    Params/sec:     {r['params_s']:>12,.0f}")
-        print(f"    RAM requise:    {ram_level}")
+        print(f"    Parameters:    {r['params']:>12,} ({r['size_mb']:.1f} MB)")
+        print(f"    Batch size:    {batch}")
+        print(f"    Time/step:     {r['step_ms']:>8.1f} ms")
+        print(f"    Samples/sec:   {r['samples_s']:>8.0f}")
+        print(f"    Params/sec:    {r['params_s']:>12,.0f}")
+        print(f"    RAM required:  {ram_level}")
     except MemoryError:
         print(f"\n  {name}")
-        print(f"    ERREUR: Pas assez de RAM pour ce modele")
-        print(f"    (estimation: ~{est['megabytes']*5:.0f} MB necessaires)")
+        print(f"    ERROR: Not enough RAM for this model")
+        print(f"    (estimated ~{est['megabytes']*5:.0f} MB required)")
     except Exception as e:
         print(f"\n  {name}")
-        print(f"    ERREUR: {e}")
+        print(f"    ERROR: {e}")
 
 print()
 print("-" * 70)
-print("  Benchmark 2: Vitesse BLAS pure (sans overhead Python)")
-print("  (Ce n'est PAS du vrai training, juste un matmul nu)")
+print("  Benchmark 2: Raw BLAS matmul speed (no Python overhead)")
+print("  (This is NOT real training, just a bare matmul)")
 print("-" * 70)
 
 matmul_sizes = [
@@ -147,24 +147,24 @@ for M, K, N in matmul_sizes:
 
 print()
 print("-" * 70)
-print("  RESUME HONNETE DES CAPACITES")
+print("  HONEST CAPABILITY SUMMARY")
 print("-" * 70)
 print("""
-  Ce qui MARCHE :
-    - Entrainement complet (forward+backward+optimizer) jusqu'a ~100M params
-    - Inference en streaming pour modeles >RAM (1 couche a la fois)
-    - Tous les layers standards (Dense, Conv2D, ReLU, BatchNorm, Dropout...)
-    - Gradient checkpointing (echange temps compute <-> memoire RAM)
+  What WORKS :
+    - Full training (forward+backward+optimizer) up to ~100M params
+    - Streaming inference for models >RAM (one layer at a time)
+    - All standard layers (Dense, Conv2D, ReLU, BatchNorm, Dropout...)
+    - Gradient checkpointing (trade compute time for RAM)
 
-  Ce qui NE MARCHE PAS :
-    - Entrainement de modeles 100B+ sur CPU (impossible, 
-      besoin des activations en RAM pour le backward)
-    - Competition avec un GPU (10-30x plus lent)
-    - Entrainement en streaming (backward a besoin de tout le graphe)
+  What DOES NOT WORK :
+    - Training 100B+ models on CPU (impossible,
+      backward pass needs full activation graph in RAM)
+    - Competing with a GPU (10-30x slower)
+    - Streaming training (backward needs the full compute graph)
 
-  Cas d'usage realistes :
-    - Entrainement sur machine sans GPU (laptop, serveur CPU)
-    - Prototypage rapide sans GPU disponible
-    - Inference de tres gros modeles sur CPU
-    - Apprentissage des fondamentaux du deep learning
+  Realistic use cases :
+    - Training on machines without GPU (laptop, CPU server)
+    - Fast prototyping without GPU access
+    - Inference of very large models on CPU
+    - Learning deep learning fundamentals
 """)

@@ -5,14 +5,14 @@ import tempfile
 from .memory import free_memory
 
 """
-LIMITES CLAIRES :
-- ParameterStore permet de stocker des parametres sur disque (mmap)
-- Utile pour l'INFERENCE de gros modeles qui ne tiennent pas en RAM
-- NE PERMET PAS l'entrainement en streaming :
-  le backward a besoin de TOUTES les activations du forward
-  donc les parametres doivent rester charges pendant forward+backward
-- Pour l'entrainement de modeles >RAM, voir le gradient checkpointing
-  dans memory.py (echange temps <-> memoire)
+CLEAR LIMITATIONS:
+- ParameterStore stores parameters on disk (mmap)
+- Useful for INFERENCE of large models that don't fit in RAM
+- Does NOT support streaming training:
+  backward needs ALL forward activations in memory
+  so parameters must stay loaded during forward+backward
+- For training models larger than RAM, see gradient checkpointing
+  in memory.py (time <-> memory tradeoff)
 """
 
 class ParameterStore:
