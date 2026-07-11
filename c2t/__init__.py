@@ -22,5 +22,5 @@ from . import storage
 from . import initializers
 from . import utils
 
-__version__ = "2.0.0"
+__version__ = "0.2.0"
 __title__ = "2C2T.DRT"
