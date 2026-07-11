@@ -440,12 +440,18 @@ class FnMatMul(_Function):
 
     @staticmethod
     def forward(ctx, a, b):
-        ctx.save_for_backward = (a.data.copy(), b.data.copy())
+        ctx.save_for_backward = (a.shape, b.shape, a.data.copy(), b.data.copy())
 
     @staticmethod
     def backward(ctx, grad_output):
-        a_data, b_data = ctx.save_for_backward
-        return (grad_output @ b_data.T, a_data.T @ grad_output)
+        a_shape, b_shape, a_data, b_data = ctx.save_for_backward
+        grad_a = grad_output @ np.swapaxes(b_data, -2, -1)
+        grad_b = np.swapaxes(a_data, -2, -1) @ grad_output
+        while grad_a.ndim > len(a_shape):
+            grad_a = grad_a.sum(axis=0)
+        while grad_b.ndim > len(b_shape):
+            grad_b = grad_b.sum(axis=0)
+        return (grad_a, grad_b)
 
 
 class FnSum(_Function):

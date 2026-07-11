@@ -841,3 +841,99 @@ class Conv2DReLU(Module):
         if self.use_bias:
             out = out + self.bias.reshape(1,-1,1,1)
         return out
+
+
+#
+# MultiheadAttention
+#
+
+class MultiheadAttention(Module):
+    def __init__(self, embed_dim, nhead, dropout=0.0, use_bias=True):
+        super().__init__()
+        assert embed_dim % nhead == 0, "embed_dim must be divisible by nhead"
+        self.embed_dim = embed_dim
+        self.nhead = nhead
+        self.head_dim = embed_dim // nhead
+        self.dropout = dropout
+
+        self.q_proj = Dense(embed_dim, embed_dim, use_bias=use_bias)
+        self.k_proj = Dense(embed_dim, embed_dim, use_bias=use_bias)
+        self.v_proj = Dense(embed_dim, embed_dim, use_bias=use_bias)
+        self.out_proj = Dense(embed_dim, embed_dim, use_bias=use_bias)
+
+    def extra_repr(self):
+        return f"embed_dim={self.embed_dim}, nhead={self.nhead}"
+
+    def __call__(self, query, key=None, value=None, mask=None):
+        return self.forward(query, key, value, mask)
+
+    def forward(self, query, key=None, value=None, mask=None):
+        if key is None:
+            key = query
+        if value is None:
+            value = key
+
+        N, Tq, D = query.shape
+        _, Tk, _ = key.shape
+        _, Tv, _ = value.shape
+        H = self.nhead
+        hd = self.head_dim
+
+        q = self.q_proj(query).reshape(N, Tq, H, hd).transpose(axes=(0, 2, 1, 3))
+        k = self.k_proj(key).reshape(N, Tk, H, hd).transpose(axes=(0, 2, 1, 3))
+        v = self.v_proj(value).reshape(N, Tv, H, hd).transpose(axes=(0, 2, 1, 3))
+
+        scale = 1.0 / np.sqrt(hd)
+        attn_scores = (q @ k.transpose(axes=(0, 1, 3, 2))) * scale
+
+        attn = attn_scores._op(FnSoftmax, axis=-1)
+        out = attn @ v
+
+        out = out.transpose(axes=(0, 2, 1, 3)).reshape(N, Tq, D)
+        return self.out_proj(out)
+
+
+class TransformerEncoderLayer(Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.0, activation="relu"):
+        super().__init__()
+        self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.linear1 = Dense(d_model, dim_feedforward)
+        self.linear2 = Dense(dim_feedforward, d_model)
+        self.norm1 = LayerNorm(d_model)
+        self.norm2 = LayerNorm(d_model)
+        self.dropout = dropout
+        self.activation = ReLU() if activation == "relu" else activation
+
+    def extra_repr(self):
+        return f"d_model={self.linear1.in_features}, nhead={self.self_attn.nhead}"
+
+    def __call__(self, x, mask=None):
+        return self.forward(x, mask)
+
+    def forward(self, x, mask=None):
+        attn_out = self.self_attn(x, mask=mask)
+        if self.training and self.dropout > 0:
+            attn_out = Dropout(self.dropout)(attn_out)
+        x = self.norm1(x + attn_out)
+
+        ff_out = self.linear1(x)
+        ff_out = self.activation(ff_out)
+        if self.training and self.dropout > 0:
+            ff_out = Dropout(self.dropout)(ff_out)
+        ff_out = self.linear2(ff_out)
+        if self.training and self.dropout > 0:
+            ff_out = Dropout(self.dropout)(ff_out)
+        x = self.norm2(x + ff_out)
+        return x
+
+
+class Residual(Module):
+    def __init__(self, sublayer):
+        super().__init__()
+        self.sublayer = sublayer
+
+    def __call__(self, x, *args, **kwargs):
+        return self.forward(x, *args, **kwargs)
+
+    def forward(self, x, *args, **kwargs):
+        return x + self.sublayer(x, *args, **kwargs)

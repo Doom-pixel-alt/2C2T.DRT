@@ -4,6 +4,7 @@ from .layers import (
     ReLU, LeakyReLU, Sigmoid, Tanh, Softmax, Identity, Reshape,
     DenseReLU, DenseSigmoid,
     MaxPool2D, AvgPool2D, Embedding, LayerNorm, Conv2DReLU,
+    MultiheadAttention, TransformerEncoderLayer, Residual,
 )
 from .optimizers import SGD, Adam, AdamW, RMSprop, LRScheduler
 from .losses import (
