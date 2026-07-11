@@ -113,21 +113,39 @@ class GradientCheckpointer:
 
         activations = [x.data.copy()]
         h = x
-        for seg in segments:
-            for layer in seg:
-                h = layer(h)
-            activations.append(h.data.copy())
+        with no_grad():
+            for seg_idx, seg in enumerate(segments):
+                for layer in seg:
+                    h = layer(h)
+                activations.append(h.data.copy())
+        out = Tensor(h.data, requires_grad=True)
+        return out, activations
 
-        return h, activations
+    def checkpoint_backward(self, model, loss, output, activations, input_tensor=None):
+        if not hasattr(model, '_modules'):
+            loss.backward()
+            return
 
-    def checkpoint_backward(self, model, loss, activations):
         layers = list(model._modules.values())
         n = len(layers)
         seg_size = max(1, n // self.num_checkpoints)
-        segment_boundaries = list(range(0, n, seg_size)) + [n]
+        segments = [layers[i:i + seg_size] for i in range(0, n, seg_size)]
 
-        grad = loss.data.copy() if loss.shape == () else None
+        # Backprop through loss function to get gradient at output
         loss.backward()
+        grad = output.grad if output.grad is not None else np.float32(1.0)
+
+        for seg_idx in range(len(segments) - 1, -1, -1):
+            if seg_idx == 0 and input_tensor is not None:
+                inp = input_tensor
+            else:
+                inp = Tensor(activations[seg_idx], requires_grad=True)
+            h = inp
+            for layer in segments[seg_idx]:
+                h = layer(h)
+            h.backward(gradient=grad)
+            if seg_idx > 0:
+                grad = inp.grad if inp.grad is not None else np.zeros_like(inp.data)
 
 
 class MemoryMappedParam:

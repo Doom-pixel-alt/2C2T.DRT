@@ -713,7 +713,7 @@ class _CatContext:
     def __init__(self, tensors, axis, output):
         self.inputs = tensors
         self.output = output
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
         self.needs_input_grad = any(t.requires_grad for t in tensors)
         self.saved_tensors = ([t.data.copy() for t in tensors], axis)
 
@@ -741,7 +741,7 @@ class _StackContext:
     def __init__(self, tensors, axis, output):
         self.inputs = tensors
         self.output = output
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
         self.needs_input_grad = any(t.requires_grad for t in tensors)
         self.saved_tensors = ([t.data.copy() for t in tensors], axis)
 

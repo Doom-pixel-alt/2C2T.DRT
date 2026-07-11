@@ -1,5 +1,5 @@
 import numpy as np
-from ..tensor import Tensor, no_grad
+from ..tensor import Tensor, no_grad, _Function
 from abc import ABC, abstractmethod
 
 
@@ -80,8 +80,8 @@ class Module(ABC):
     def forward(self, x):
         pass
 
-    def __call__(self, x):
-        return self.forward(x)
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
 
 
 class Sequential(Module):
@@ -203,32 +203,32 @@ class _Conv2DCtx:
         self.OW = OW
         self.output = output
         self.needs_input_grad = True
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
 
     def backward(self, grad_output):
-        return self._backward(grad_output)
+        return self._backward_impl(self.inputs, self.conv, self.cols, self.N, self.OH, self.OW, grad_output)
 
-    def _backward(self, grad_output):
-        conv = self.conv
-        N, C, H, W = self.inputs[0].shape
+    @staticmethod
+    def _backward_impl(inputs, conv, cols, N, OH, OW, grad_output):
+        N, C, H, W = inputs[0].shape
         KH, KW = conv.kernel_size
         SH, SW = conv.stride
         PH, PW = conv.padding
 
         grad_out_reshaped = np.ascontiguousarray(
-            grad_output.transpose(0, 2, 3, 1).reshape(N * self.OH * self.OW, -1)
+            grad_output.transpose(0, 2, 3, 1).reshape(N * OH * OW, -1)
         )
 
         w_cols = conv.weight.data.reshape(conv.out_channels, -1)
         grad_cols = grad_out_reshaped @ w_cols
-        grad_w_cols = self.cols.T @ grad_out_reshaped
+        grad_w_cols = cols.T @ grad_out_reshaped
         grad_w = grad_w_cols.T.reshape(conv.weight.shape)
 
-        grad_cols_reshaped = grad_cols.reshape(N, self.OH, self.OW, C, KH, KW).transpose(0, 3, 4, 5, 1, 2)
+        grad_cols_reshaped = grad_cols.reshape(N, OH, OW, C, KH, KW).transpose(0, 3, 4, 5, 1, 2)
         grad_x = np.zeros((N, C, H + 2 * PH, W + 2 * PW), dtype=np.float32)
         for i in range(KH):
             for j in range(KW):
-                grad_x[:, :, i:i + self.OH * SH:SH, j:j + self.OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
+                grad_x[:, :, i:i + OH * SH:SH, j:j + OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
         if PH > 0:
             grad_x = grad_x[:, :, PH:-PH, :]
         if PW > 0:
@@ -261,8 +261,95 @@ class Dropout(Module):
             return x
         mask = np.random.binomial(1, 1 - self.rate, size=x.shape).astype(np.float32)
         mask /= (1 - self.rate)
-        out = Tensor(x.data * mask, requires_grad=x.requires_grad)
-        return out
+        mask_tensor = Tensor(mask)
+        return x._op(FnDropout, mask_tensor)
+
+
+class FnBatchNorm(_Function):
+    @staticmethod
+    def forward_raw(x, gamma, beta, eps, running_mean, running_var, momentum, training, axes, ndim):
+        if training:
+            mean = x.data.mean(axis=axes)
+            var = x.data.var(axis=axes) + eps
+            if ndim == 4:
+                mean_r = mean.reshape(1, -1, 1, 1)
+                var_r = var.reshape(1, -1, 1, 1)
+            else:
+                mean_r = mean
+                var_r = var
+            with no_grad():
+                running_mean.data = momentum * running_mean.data + (1 - momentum) * mean
+                running_var.data = momentum * running_var.data + (1 - momentum) * var
+            x_norm = (x.data - mean_r) / np.sqrt(var_r)
+        else:
+            if ndim == 4:
+                rm = running_mean.data.reshape(1, -1, 1, 1)
+                rv = running_var.data.reshape(1, -1, 1, 1)
+            else:
+                rm = running_mean.data
+                rv = running_var.data
+            x_norm = (x.data - rm) / np.sqrt(rv)
+        if ndim == 4:
+            gamma_r = gamma.data.reshape(1, -1, 1, 1)
+            beta_r = beta.data.reshape(1, -1, 1, 1)
+        else:
+            gamma_r = gamma.data
+            beta_r = beta.data
+        return gamma_r * x_norm + beta_r
+
+    @staticmethod
+    def forward(ctx, x, gamma, beta, eps, running_mean, running_var, momentum, training, axes, ndim):
+        if training:
+            mean = x.data.mean(axis=axes)
+            var = x.data.var(axis=axes) + eps
+            if ndim == 4:
+                mean_r = mean.reshape(1, -1, 1, 1)
+                var_r = var.reshape(1, -1, 1, 1)
+            else:
+                mean_r = mean
+                var_r = var
+            with no_grad():
+                running_mean.data = momentum * running_mean.data + (1 - momentum) * mean
+                running_var.data = momentum * running_var.data + (1 - momentum) * var
+            ctx.save_for_backward = (x.data.copy(), gamma.data.copy(), mean, var, axes, ndim)
+        else:
+            if ndim == 4:
+                rm = running_mean.data.reshape(1, -1, 1, 1)
+                rv = running_var.data.reshape(1, -1, 1, 1)
+            else:
+                rm = running_mean.data
+                rv = running_var.data
+            ctx.save_for_backward = None
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        saved = ctx.save_for_backward
+        if saved is None:
+            return (None, None, None, None, None, None, None, None, None, None)
+        x_data, gamma_data, mean, var, axes, ndim = saved
+        N = x_data.size // mean.size
+        if ndim == 4:
+            mean_r = mean.reshape(1, -1, 1, 1)
+            var_r = var.reshape(1, -1, 1, 1)
+            gamma_r = gamma_data.reshape(1, -1, 1, 1)
+        else:
+            mean_r = mean
+            var_r = var
+            gamma_r = gamma_data
+        x_norm = (x_data - mean_r) / np.sqrt(var_r)
+        dx_norm = grad_output * gamma_r
+        if ndim == 4:
+            dgamma = (grad_output * x_norm).sum(axis=(0, 2, 3))
+            dbeta = grad_output.sum(axis=(0, 2, 3))
+        else:
+            dgamma = (grad_output * x_norm).sum(axis=0)
+            dbeta = grad_output.sum(axis=0)
+        dx = (1.0 / N) * (1.0 / np.sqrt(var_r)) * (
+            N * dx_norm
+            - dx_norm.sum(axis=axes, keepdims=True)
+            - x_norm * (dx_norm * x_norm).sum(axis=axes, keepdims=True)
+        )
+        return (dx, dgamma, dbeta, None, None, None, None, None, None, None)
 
 
 class BatchNorm(Module):
@@ -281,46 +368,13 @@ class BatchNorm(Module):
         return f"features={self.num_features}"
 
     def forward(self, x):
-        if self.training:
-            if x.ndim == 4:
-                axes = (0, 2, 3)
-            else:
-                axes = 0
-
-            batch_mean = Tensor(x.data.mean(axis=axes))
-            batch_var = Tensor(x.data.var(axis=axes) + self.eps)
-
-            with no_grad():
-                self.running_mean.data = self.momentum * self.running_mean.data + (1 - self.momentum) * batch_mean.data
-                self.running_var.data = self.momentum * self.running_var.data + (1 - self.momentum) * batch_var.data
-
-            if x.ndim == 4:
-                batch_mean_r = batch_mean.reshape(1, -1, 1, 1)
-                batch_var_r = batch_var.reshape(1, -1, 1, 1)
-                gamma_r = self.gamma.reshape(1, -1, 1, 1)
-                beta_r = self.beta.reshape(1, -1, 1, 1)
-            else:
-                batch_mean_r = batch_mean
-                batch_var_r = batch_var
-                gamma_r = self.gamma
-                beta_r = self.beta
-
-            x_norm = (x - batch_mean_r) / batch_var_r.sqrt()
-            return gamma_r * x_norm + beta_r
+        if x.ndim == 4:
+            axes = (0, 2, 3)
         else:
-            if x.ndim == 4:
-                rm = self.running_mean.reshape(1, -1, 1, 1)
-                rv = self.running_var.reshape(1, -1, 1, 1)
-                g = self.gamma.reshape(1, -1, 1, 1)
-                b = self.beta.reshape(1, -1, 1, 1)
-            else:
-                rm = self.running_mean
-                rv = self.running_var
-                g = self.gamma
-                b = self.beta
-
-            x_norm = (x - rm) / rv.sqrt()
-            return g * x_norm + b
+            axes = 0
+        return x._op(FnBatchNorm, self.gamma, self.beta, self.eps,
+                     self.running_mean, self.running_var, self.momentum,
+                     self.training, axes, x.ndim)
 
 
 class ReLU(Module):
@@ -382,7 +436,20 @@ class Reshape(Module):
         return x.reshape(*self.shape)
 
 
-from ..tensor import _Function
+class FnDropout(_Function):
+    @staticmethod
+    def forward_raw(t, mask):
+        return t.data * mask.data
+
+    @staticmethod
+    def forward(ctx, t, mask):
+        ctx.save_for_backward = (mask.data.copy(),)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (mask,) = ctx.save_for_backward
+        return (grad_output * mask,)
+
 
 class FnReLU(_Function):
     @staticmethod
@@ -391,12 +458,12 @@ class FnReLU(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (t.data.copy(),)
+        ctx.save_for_backward = ((t.data > 0),)
 
     @staticmethod
     def backward(ctx, grad_output):
-        (val,) = ctx.save_for_backward
-        return (grad_output * (val > 0).astype(np.float32),)
+        (mask,) = ctx.save_for_backward
+        return (grad_output * mask.astype(np.float32),)
 
 
 class FnLeakyReLU(_Function):
@@ -407,13 +474,13 @@ class FnLeakyReLU(_Function):
     @staticmethod
     def forward(ctx, t, alpha=0.01):
         ctx.alpha = alpha
-        ctx.save_for_backward = (t.data.copy(),)
+        ctx.save_for_backward = ((t.data > 0),)
 
     @staticmethod
     def backward(ctx, grad_output):
-        (val,) = ctx.save_for_backward
+        (mask,) = ctx.save_for_backward
         alpha = ctx.alpha
-        return (grad_output * np.where(val > 0, 1.0, alpha).astype(np.float32),)
+        return (grad_output * np.where(mask, 1.0, alpha).astype(np.float32),)
 
 
 class FnSigmoid(_Function):
@@ -559,7 +626,7 @@ class _MaxPoolCtx:
         self.PH, self.PW = PH, PW
         self.output = output
         self.needs_input_grad = True
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
 
     def backward(self, grad_output):
         return self._backward(grad_output)
@@ -577,7 +644,7 @@ class _MaxPoolCtx:
         max_vals = windows.max(axis=(-2,-1), keepdims=True)
         mask = (windows == max_vals).astype(np.float32)
         counts = mask.sum(axis=(-2,-1), keepdims=True)
-        mask = np.divide(mask, np.maximum(counts, 1), where=counts>0)
+        mask = np.divide(mask, np.maximum(counts, 1), out=np.zeros_like(mask), where=counts>0)
 
         go_expanded = grad_output[:, :, :, :, None, None]
         grad_windows = go_expanded * mask
@@ -635,7 +702,7 @@ class _AvgPoolCtx:
         self.PH, self.PW = PH, PW
         self.output = output
         self.needs_input_grad = True
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
         self.pool = pool
 
     def backward(self, grad_output):
@@ -695,7 +762,7 @@ class _EmbeddingCtx:
         self.idx = idx
         self.output = output
         self.needs_input_grad = True
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
 
     def backward(self, grad_output):
         return self._backward(grad_output)
@@ -759,7 +826,7 @@ class _LayerNormCtx:
         self.reduce_axes = reduce_axes
         self.output = output
         self.needs_input_grad = True
-        self.backward_fn = self._backward
+        self.backward_fn = self.backward
 
     def backward(self, grad_output):
         return self._backward(grad_output)
@@ -829,11 +896,12 @@ class Conv2DReLU(Module):
         cols = windows.transpose(0,2,3,1,4,5).reshape(N*OH*OW, C*KH*KW)
         w_cols = self.weight.data.reshape(self.out_channels, -1)
         out_data = (cols @ w_cols.T).reshape(N, OH, OW, self.out_channels).transpose(0,3,1,2)
+        pre_act = out_data.copy()
         out_data = np.maximum(out_data, 0)
 
         if self.training:
             out = Tensor(out_data, requires_grad=True)
-            out._ctx = _Conv2DCtx(x, self, cols, N, OH, OW, out_data)
+            out._ctx = _Conv2DReLUCtx(x, self, cols, N, OH, OW, pre_act)
             if self.use_bias:
                 out = out + self.bias.reshape(1,-1,1,1)
             return out
@@ -841,6 +909,26 @@ class Conv2DReLU(Module):
         if self.use_bias:
             out = out + self.bias.reshape(1,-1,1,1)
         return out
+
+
+class _Conv2DReLUCtx:
+    def __init__(self, x, conv, cols, N, OH, OW, pre_act):
+        self.inputs = [x, conv.weight]
+        if conv.use_bias:
+            self.inputs.append(conv.bias)
+        self.conv = conv
+        self.cols = cols
+        self.N = N
+        self.OH = OH
+        self.OW = OW
+        self.pre_act = pre_act
+        self.needs_input_grad = True
+        self.backward_fn = self.backward
+
+    def backward(self, grad_output):
+        relu_mask = (self.pre_act > 0).astype(np.float32)
+        grad = grad_output * relu_mask
+        return _Conv2DCtx._backward_impl(self.inputs, self.conv, self.cols, self.N, self.OH, self.OW, grad)
 
 
 #
@@ -863,9 +951,6 @@ class MultiheadAttention(Module):
 
     def extra_repr(self):
         return f"embed_dim={self.embed_dim}, nhead={self.nhead}"
-
-    def __call__(self, query, key=None, value=None, mask=None):
-        return self.forward(query, key, value, mask)
 
     def forward(self, query, key=None, value=None, mask=None):
         if key is None:
@@ -907,9 +992,6 @@ class TransformerEncoderLayer(Module):
     def extra_repr(self):
         return f"d_model={self.linear1.in_features}, nhead={self.self_attn.nhead}"
 
-    def __call__(self, x, mask=None):
-        return self.forward(x, mask)
-
     def forward(self, x, mask=None):
         attn_out = self.self_attn(x, mask=mask)
         if self.training and self.dropout > 0:
@@ -931,9 +1013,6 @@ class Residual(Module):
     def __init__(self, sublayer):
         super().__init__()
         self.sublayer = sublayer
-
-    def __call__(self, x, *args, **kwargs):
-        return self.forward(x, *args, **kwargs)
 
     def forward(self, x, *args, **kwargs):
         return x + self.sublayer(x, *args, **kwargs)
