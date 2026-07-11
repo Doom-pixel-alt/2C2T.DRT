@@ -121,11 +121,15 @@ python benchmark.py
 | Feature | Status |
 |---------|--------|
 | Tensor with autograd (20+ differentiable ops) | ✅ Stable |
-| Layers: Dense, Conv2D, BatchNorm, Dropout | ✅ Stable |
+| Layers: Dense, Conv2D, MaxPool2D, AvgPool2D | ✅ Stable |
+| Normalization: BatchNorm, LayerNorm | ✅ Stable |
+| Embedding, Dropout, Flatten, Reshape | ✅ Stable |
 | Activations: ReLU, LeakyReLU, Sigmoid, Tanh, Softmax | ✅ Stable |
-| Fused DenseReLU (Dense + ReLU in 1 node) | ✅ Stable |
+| Fused layers: DenseReLU, DenseSigmoid, Conv2DReLU | ✅ Stable |
 | Optimizers: SGD, Adam, AdamW, RMSprop | ✅ Stable |
 | Loss: MSE, MAE, CrossEntropy, BinaryCE, Huber, NLL | ✅ Stable |
+| Weight initializers: Xavier, He, Orthogonal, Kaiming | ✅ Stable |
+| Gradient checking, gradient clipping | ✅ Stable |
 
 ### Memory optimization
 
@@ -206,6 +210,8 @@ python benchmark.py
 │   ├── data.py                 # Data loading
 │   ├── parallel.py             # CPU parallelism
 │   ├── sharding.py             # Memory sharding
+│   ├── initializers.py         # Weight initialization methods
+│   ├── utils.py                # Gradient checking, clipping
 │   ├── storage.py              # mmap storage
 │   └── memory.py               # Memory optimization
 ├── main.py                     # CLI entry point

@@ -205,6 +205,9 @@ class _Conv2DCtx:
         self.needs_input_grad = True
         self.backward_fn = self._backward
 
+    def backward(self, grad_output):
+        return self._backward(grad_output)
+
     def _backward(self, grad_output):
         conv = self.conv
         N, C, H, W = self.inputs[0].shape
@@ -225,7 +228,7 @@ class _Conv2DCtx:
         grad_x = np.zeros((N, C, H + 2 * PH, W + 2 * PW), dtype=np.float32)
         for i in range(KH):
             for j in range(KW):
-                grad_x[:, :, i:self.OH * SH:SH, j:self.OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
+                grad_x[:, :, i:i + self.OH * SH:SH, j:j + self.OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
         if PH > 0:
             grad_x = grad_x[:, :, PH:-PH, :]
         if PW > 0:
@@ -504,3 +507,337 @@ class DenseSigmoid(Module):
         if self.use_bias:
             out = out + self.bias
         return out._op(FnSigmoid)
+
+
+#
+# Pooling layers
+#
+
+class MaxPool2D(Module):
+    def __init__(self, kernel_size=2, stride=None, padding=0):
+        super().__init__()
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.stride = stride if stride is not None else self.kernel_size
+        self.stride = self.stride if isinstance(self.stride, tuple) else (self.stride, self.stride)
+        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
+
+    def extra_repr(self):
+        return f"kernel={self.kernel_size}, stride={self.stride}"
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        KH, KW = self.kernel_size
+        SH, SW = self.stride
+        PH, PW = self.padding
+
+        xd = x.data
+        if PH > 0 or PW > 0:
+            xd = np.pad(xd, ((0,0),(0,0),(PH,PH),(PW,PW)), mode='constant')
+
+        OH = (H + 2*PH - KH)//SH + 1
+        OW = (W + 2*PW - KW)//SW + 1
+
+        windows = np.lib.stride_tricks.sliding_window_view(xd, (KH, KW), axis=(-2,-1))
+        windows = windows[:, :, ::SH, ::SW, :, :]
+        out_data = windows.max(axis=(-2, -1))
+
+        if self.training:
+            out = Tensor(out_data, requires_grad=True)
+            out._ctx = _MaxPoolCtx(x, self, xd, windows, KH, KW, SH, SW, PH, PW, out_data)
+            return out
+        return Tensor(out_data)
+
+
+class _MaxPoolCtx:
+    def __init__(self, x, pool, xd, windows, KH, KW, SH, SW, PH, PW, output):
+        self.inputs = [x]
+        self.pool = pool
+        self.xd = xd
+        self.windows = windows
+        self.KH, self.KW = KH, KW
+        self.SH, self.SW = SH, SW
+        self.PH, self.PW = PH, PW
+        self.output = output
+        self.needs_input_grad = True
+        self.backward_fn = self._backward
+
+    def backward(self, grad_output):
+        return self._backward(grad_output)
+
+    def _backward(self, grad_output):
+        N, C, H, W = self.inputs[0].shape
+        PH, PW = self.PH, self.PW
+        SH, SW = self.SH, self.SW
+        windows = self.windows
+        KH, KW = self.KH, self.KW
+        OH = grad_output.shape[2]
+        OW = grad_output.shape[3]
+
+        grad_x = np.zeros((N, C, H + 2*PH, W + 2*PW), dtype=np.float32)
+        max_vals = windows.max(axis=(-2,-1), keepdims=True)
+        mask = (windows == max_vals).astype(np.float32)
+        counts = mask.sum(axis=(-2,-1), keepdims=True)
+        mask = np.divide(mask, np.maximum(counts, 1), where=counts>0)
+
+        go_expanded = grad_output[:, :, :, :, None, None]
+        grad_windows = go_expanded * mask
+
+        for i in range(KH):
+            for j in range(KW):
+                grad_x[:, :, i:i+OH*SH:SH, j:j+OW*SW:SW] += grad_windows[:, :, :, :, i, j]
+
+        if PH > 0: grad_x = grad_x[:, :, PH:-PH, :]
+        if PW > 0: grad_x = grad_x[:, :, :, PW:-PW]
+        return (grad_x,)
+
+
+class AvgPool2D(Module):
+    def __init__(self, kernel_size=2, stride=None, padding=0):
+        super().__init__()
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.stride = stride if stride is not None else self.kernel_size
+        self.stride = self.stride if isinstance(self.stride, tuple) else (self.stride, self.stride)
+        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
+
+    def extra_repr(self):
+        return f"kernel={self.kernel_size}, stride={self.stride}"
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        KH, KW = self.kernel_size
+        SH, SW = self.stride
+        PH, PW = self.padding
+
+        xd = x.data
+        if PH > 0 or PW > 0:
+            xd = np.pad(xd, ((0,0),(0,0),(PH,PH),(PW,PW)), mode='constant')
+
+        OH = (H + 2*PH - KH)//SH + 1
+        OW = (W + 2*PW - KW)//SW + 1
+
+        windows = np.lib.stride_tricks.sliding_window_view(xd, (KH, KW), axis=(-2,-1))
+        windows = windows[:, :, ::SH, ::SW, :, :]
+        out_data = windows.mean(axis=(-2, -1))
+
+        if self.training:
+            out = Tensor(out_data, requires_grad=True)
+            out._ctx = _AvgPoolCtx(x, self, xd, KH, KW, SH, SW, PH, PW, out_data)
+            return out
+        return Tensor(out_data)
+
+
+class _AvgPoolCtx:
+    def __init__(self, x, pool, xd, KH, KW, SH, SW, PH, PW, output):
+        self.inputs = [x]
+        self.xd = xd
+        self.KH, self.KW = KH, KW
+        self.SH, self.SW = SH, SW
+        self.PH, self.PW = PH, PW
+        self.output = output
+        self.needs_input_grad = True
+        self.backward_fn = self._backward
+        self.pool = pool
+
+    def backward(self, grad_output):
+        return self._backward(grad_output)
+
+    def _backward(self, grad_output):
+        N, C, H, W = self.inputs[0].shape
+        PH, PW = self.PH, self.PW
+        SH, SW = self.SH, self.SW
+        KH, KW = self.KH, self.KW
+        OH, OW = grad_output.shape[2], grad_output.shape[3]
+
+        grad_x = np.zeros((N, C, H + 2*PH, W + 2*PW), dtype=np.float32)
+        scale = 1.0 / (KH * KW)
+        go_expanded = grad_output[:, :, :, :, None, None] * scale
+
+        for i in range(KH):
+            for j in range(KW):
+                grad_x[:, :, i:i+OH*SH:SH, j:j+OW*SW:SW] += go_expanded
+
+        if PH > 0: grad_x = grad_x[:, :, PH:-PH, :]
+        if PW > 0: grad_x = grad_x[:, :, :, PW:-PW]
+        return (grad_x,)
+
+
+#
+# Embedding layer
+#
+
+class Embedding(Module):
+    def __init__(self, num_embeddings, embedding_dim, padding_idx=None):
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        self.padding_idx = padding_idx
+        w_data = np.random.randn(num_embeddings, embedding_dim).astype(np.float32) * 0.01
+        self.weight = Tensor(w_data, requires_grad=True)
+
+    def extra_repr(self):
+        return f"{self.num_embeddings}x{self.embedding_dim}"
+
+    def forward(self, x):
+        idx = x.data.astype(np.int64) if hasattr(x, 'data') else x.astype(np.int64)
+        idx = np.clip(idx, 0, self.num_embeddings - 1)
+        out_data = self.weight.data[idx]
+
+        if self.training:
+            out = Tensor(out_data, requires_grad=True)
+            out._ctx = _EmbeddingCtx(self, idx, out_data)
+            return out
+        return Tensor(out_data)
+
+
+class _EmbeddingCtx:
+    def __init__(self, emb, idx, output):
+        self.inputs = [emb.weight]
+        self.idx = idx
+        self.output = output
+        self.needs_input_grad = True
+        self.backward_fn = self._backward
+
+    def backward(self, grad_output):
+        return self._backward(grad_output)
+
+    def _backward(self, grad_output):
+        grad_w = np.zeros_like(self.inputs[0].data)
+        idx_flat = self.idx.ravel()
+        go_flat = grad_output.reshape(-1, grad_output.shape[-1])
+        np.add.at(grad_w, idx_flat, go_flat)
+        return (grad_w,)
+
+
+#
+# LayerNorm
+#
+
+class LayerNorm(Module):
+    def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
+        super().__init__()
+        self.normalized_shape = normalized_shape if isinstance(normalized_shape, tuple) else (normalized_shape,)
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = Tensor(np.ones(self.normalized_shape, dtype=np.float32), requires_grad=True)
+            self.bias = Tensor(np.zeros(self.normalized_shape, dtype=np.float32), requires_grad=True)
+
+    def extra_repr(self):
+        return f"{self.normalized_shape}, eps={self.eps}"
+
+    def forward(self, x):
+        shape = self.normalized_shape
+        reduce_axes = tuple(range(-len(shape), 0))
+
+        mean = x.data.mean(axis=reduce_axes, keepdims=True)
+        var = x.data.var(axis=reduce_axes, keepdims=True) + self.eps
+        x_norm = (x.data - mean) / np.sqrt(var)
+
+        if self.training:
+            out = Tensor(x_norm, requires_grad=True)
+            out._ctx = _LayerNormCtx(x, self, x_norm, mean, var, reduce_axes, x_norm)
+            if self.elementwise_affine:
+                out = out * self.weight + self.bias
+            return out
+
+        out = Tensor(x_norm)
+        if self.elementwise_affine:
+            out = out * self.weight + self.bias
+        return out
+
+
+class _LayerNormCtx:
+    def __init__(self, x, ln, x_norm, mean, var, reduce_axes, output):
+        self.inputs = [x]
+        if ln.elementwise_affine:
+            self.inputs.append(ln.weight)
+            self.inputs.append(ln.bias)
+        self.ln = ln
+        self.x_norm = x_norm
+        self.mean = mean
+        self.var = var
+        self.reduce_axes = reduce_axes
+        self.output = output
+        self.needs_input_grad = True
+        self.backward_fn = self._backward
+
+    def backward(self, grad_output):
+        return self._backward(grad_output)
+
+    def _backward(self, grad_output):
+        ln = self.ln
+        x = self.inputs[0]
+        x_norm = self.x_norm
+        mean = self.mean
+        var = self.var
+        reduce_axes = self.reduce_axes
+        N = x.data.size / x_norm.size
+
+        if ln.elementwise_affine and len(self.inputs) >= 3:
+            grad_weight = (grad_output * x_norm).sum(axis=tuple(range(grad_output.ndim - len(ln.normalized_shape))))
+            grad_bias = grad_output.sum(axis=tuple(range(grad_output.ndim - len(ln.normalized_shape))))
+            grads = [None, grad_weight, grad_bias]
+        else:
+            grads = [None]
+
+        dx = (1.0 / N) * (1.0 / np.sqrt(var)) * (
+            N * grad_output
+            - grad_output.sum(axis=reduce_axes, keepdims=True)
+            - x_norm * (grad_output * x_norm).sum(axis=reduce_axes, keepdims=True)
+        )
+        grads[0] = dx
+        return tuple(grads)
+
+
+#
+# Fused Conv2DReLU
+#
+
+class Conv2DReLU(Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, use_bias=True):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size if isinstance(kernel_size, tuple) else (kernel_size, kernel_size)
+        self.stride = stride if isinstance(stride, tuple) else (stride, stride)
+        self.padding = padding if isinstance(padding, tuple) else (padding, padding)
+        self.use_bias = use_bias
+        k = 1.0 / (in_channels * self.kernel_size[0] * self.kernel_size[1])
+        w_data = np.random.uniform(-np.sqrt(k), np.sqrt(k), size=(out_channels, in_channels, *self.kernel_size)).astype(np.float32)
+        self.weight = Tensor(w_data, requires_grad=True)
+        if use_bias:
+            self.bias = Tensor(np.zeros(out_channels, dtype=np.float32), requires_grad=True)
+
+    def extra_repr(self):
+        return f"in={self.in_channels}, out={self.out_channels}, kernel={self.kernel_size}"
+
+    def forward(self, x):
+        N, C, H, W = x.shape
+        KH, KW = self.kernel_size
+        SH, SW = self.stride
+        PH, PW = self.padding
+
+        xd = x.data
+        if PH > 0 or PW > 0:
+            xd = np.pad(xd, ((0,0),(0,0),(PH,PH),(PW,PW)), mode='constant')
+
+        OH = (H + 2*PH - KH)//SH + 1
+        OW = (W + 2*PW - KW)//SW + 1
+
+        windows = np.lib.stride_tricks.sliding_window_view(xd, (KH, KW), axis=(-2,-1))[:,:,::SH,::SW,:,:]
+        windows = np.ascontiguousarray(windows)
+        cols = windows.transpose(0,2,3,1,4,5).reshape(N*OH*OW, C*KH*KW)
+        w_cols = self.weight.data.reshape(self.out_channels, -1)
+        out_data = (cols @ w_cols.T).reshape(N, OH, OW, self.out_channels).transpose(0,3,1,2)
+        out_data = np.maximum(out_data, 0)
+
+        if self.training:
+            out = Tensor(out_data, requires_grad=True)
+            out._ctx = _Conv2DCtx(x, self, cols, N, OH, OW, out_data)
+            if self.use_bias:
+                out = out + self.bias.reshape(1,-1,1,1)
+            return out
+        out = Tensor(out_data)
+        if self.use_bias:
+            out = out + self.bias.reshape(1,-1,1,1)
+        return out
