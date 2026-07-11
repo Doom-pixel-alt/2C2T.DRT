@@ -1,5 +1,5 @@
 """
-2C2T.DRT
+c2t.DRT
 =========================================================
 Train neural networks of ANY size on CPU,
 with automatic sharding, multi-core parallelism,
@@ -18,11 +18,11 @@ import numpy as np
 
 try:
     import c2t
+
 except ImportError:
     import sys, os
     sys.path.insert(0, os.path.dirname(__file__))
     import c2t
-
 from c2t.data import DataLoader
 from c2t.memory import get_available_memory_mb, suggest_batch_size
 from c2t.sharding import auto_shard_model
@@ -144,7 +144,7 @@ def build_model(model_type="mlp"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="2C2T.DRT")
+    parser = argparse.ArgumentParser(description="c2t.DRT")
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.001)
@@ -169,7 +169,7 @@ def main():
         set_num_threads(args.threads)
 
     print("=" * 68)
-    print("  2C2T.DRT")
+    print("  c2t.DRT")
     print("  Deep Learning for CPU : models of ANY size")
     print("=" * 68)
     print(f"  CPU cores: {cpu_count()} | Threads: {args.threads or 'auto'}")
@@ -285,7 +285,7 @@ def main():
     print(f"    True: {y_test[0:4].tolist()}")
 
     print()
-    print("  [OK] 2C2T.DRT training complete !")
+    print("  [OK] c2t.DRT training complete !")
     print("=" * 68)
 
 
