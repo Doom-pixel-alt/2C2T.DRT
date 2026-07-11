@@ -2,8 +2,6 @@
 
 # 2C2T.DRT
 
-**2C2T.DRT**
-
 *Train neural networks on CPU. No GPU. No budget. No bullshit.*
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
@@ -32,7 +30,7 @@ Real benchmarks, measured on a standard 16-core CPU :
 | MLP 5 layers (8.4M params) | 32 MB | 16 | **393 ms** | 41 |
 | MLP 4 layers (32M params) | 108 MB | 8 | **1049 ms** | 8 |
 
-> **Note**: These measurements include full forward + backward + Adam update. Not raw BLAS benchmarks.
+> **Note**: These measurements include full forward + backward + Adam update. Not raw BLAS benchmarks. It can store billions of parameters on disk for inference. Training is limited by your RAM, typically 50-200M params max on a consumer machine.
 
 ### In practice: one MNIST epoch (60K samples)
 
@@ -220,5 +218,3 @@ python benchmark.py
 ## License
 
 MIT — do whatever you want. Improve it, fork it, distribute it.
-
-
