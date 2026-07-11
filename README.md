@@ -121,6 +121,8 @@ python benchmark.py
 | Feature | Status |
 |---------|--------|
 | Tensor with autograd (20+ differentiable ops) | ✅ Stable |
+| Transformer: MultiheadAttention, TransformerEncoderLayer | ✅ Stable |
+| Residual connections (x + sublayer(x)) | ✅ Stable |
 | Layers: Dense, Conv2D, MaxPool2D, AvgPool2D | ✅ Stable |
 | Normalization: BatchNorm, LayerNorm | ✅ Stable |
 | Embedding, Dropout, Flatten, Reshape | ✅ Stable |
