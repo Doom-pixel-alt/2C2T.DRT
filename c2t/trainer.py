@@ -3,7 +3,10 @@ import time
 import os
 from .tensor import Tensor, no_grad
 from .optimizers import LRScheduler
-from .memory import free_memory, get_available_memory_mb, suggest_batch_size
+from .memory import (
+    GradientCheckpointer, free_memory, get_available_memory_mb,
+    suggest_batch_size,
+)
 from .parallel import get_num_threads, parallel_batch_apply
 
 
@@ -58,7 +61,33 @@ class Trainer:
             target_class = target
         return (pred_class == target_class).mean()
 
-    def train_epoch(self, train_loader, grad_accumulation=1, max_batches=None):
+    @staticmethod
+    def _accumulation_sample_count(train_loader, batch_idx, grad_accumulation,
+                                   current_batch_size, total_batches=None):
+        """Count samples in the optimizer group without retaining its graphs."""
+        if not all(hasattr(train_loader, name) for name in ("batch_size", "n", "drop_last")):
+            return current_batch_size * grad_accumulation
+        total_batches = min(len(train_loader), total_batches or len(train_loader))
+        group_start = batch_idx - (batch_idx % grad_accumulation)
+        group_end = min(group_start + grad_accumulation, total_batches)
+        count = (group_end - group_start) * train_loader.batch_size
+        if not train_loader.drop_last and group_start <= total_batches - 1 < group_end:
+            final_batch = train_loader.n - train_loader.batch_size * (total_batches - 1)
+            count -= train_loader.batch_size - final_batch
+        return max(1, count)
+
+    def train_epoch(self, train_loader, grad_accumulation=1, max_batches=None,
+                    gradient_checkpointing=False, checkpoint_segments=4):
+        if grad_accumulation < 1:
+            raise ValueError("grad_accumulation must be at least 1")
+        checkpointer = None
+        if gradient_checkpointing:
+            checkpointer = GradientCheckpointer(checkpoint_segments)
+            if not checkpointer.supports(self.model):
+                raise ValueError(
+                    "gradient checkpointing requires a c2t.Sequential model; "
+                    "it cannot be combined with the current sharded wrapper"
+                )
         self.model.train()
         total_loss = 0.0
         total_acc = 0.0
@@ -73,11 +102,25 @@ class Trainer:
             x = Tensor(x_data)
             y = Tensor(y_data)
 
-            pred = self.model(x)
+            if checkpointer:
+                pred, checkpoint_state = checkpointer.checkpoint_forward(self.model, x)
+            else:
+                pred = self.model(x)
+                checkpoint_state = None
             loss = self.loss_fn(pred, y)
             loss_val = loss.data.item()
 
-            loss.backward()
+            # Loss functions are batch means.  Weight each micro-batch by its
+            # sample count so accumulated gradients match one true large batch,
+            # including the final, smaller DataLoader batch.
+            group_samples = self._accumulation_sample_count(
+                train_loader, batch_idx, grad_accumulation, len(x_data), max_batches
+            )
+            loss_for_backward = loss * (len(x_data) / group_samples)
+            if checkpointer:
+                checkpointer.checkpoint_backward(loss_for_backward, pred, checkpoint_state)
+            else:
+                loss_for_backward.backward()
 
             total_loss += loss_val
             total_acc += self._compute_accuracy(pred.data, y_data)
@@ -89,8 +132,9 @@ class Trainer:
                 if hasattr(self.model, 'step_end'):
                     self.model.step_end()
 
-        if n_batches > 0 and (batch_idx + 1) % grad_accumulation != 0:
+        if n_batches > 0 and n_batches % grad_accumulation != 0:
             self.optimizer.step()
+            self.optimizer.zero_grad()
             if hasattr(self.model, 'step_end'):
                 self.model.step_end()
 
@@ -124,7 +168,8 @@ class Trainer:
 
     def fit(self, train_loader, val_loader=None, epochs=10, grad_accumulation=1,
             early_stopping_patience=None, lr_scheduler=None, save_path=None,
-            max_batches_per_epoch=None, verbose_interval=1, auto_batch=False):
+            max_batches_per_epoch=None, verbose_interval=1, auto_batch=False,
+            gradient_checkpointing=False, checkpoint_segments=4):
 
         if auto_batch:
             sample = next(iter(train_loader))[0][0].shape
@@ -139,7 +184,13 @@ class Trainer:
         for epoch in range(1, epochs + 1):
             t0 = time.time()
 
-            train_loss, train_acc = self.train_epoch(train_loader, grad_accumulation, max_batches_per_epoch)
+            train_loss, train_acc = self.train_epoch(
+                train_loader,
+                grad_accumulation,
+                max_batches_per_epoch,
+                gradient_checkpointing,
+                checkpoint_segments,
+            )
 
             val_loss, val_acc = 0.0, 0.0
             if val_loader:

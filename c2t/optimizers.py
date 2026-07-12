@@ -37,11 +37,14 @@ class SGD(Optimizer):
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
-                grad = p.grad.copy()
+                # Gradients are discarded by zero_grad after the update; do
+                # not clone an entire parameter tensor just to read them.
+                grad = p.grad
                 if self.weight_decay > 0:
-                    grad += self.weight_decay * p.data
+                    grad = grad + self.weight_decay * p.data
                 if self.momentum > 0:
-                    self._velocities[i] = self.momentum * self._velocities[i] - self.lr * grad
+                    self._velocities[i] *= self.momentum
+                    self._velocities[i] -= self.lr * grad
                     if self.nesterov:
                         p.data += self.momentum * self._velocities[i] - self.lr * grad
                     else:
@@ -66,14 +69,21 @@ class Adam(Optimizer):
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
-                grad = p.grad.copy()
+                grad = p.grad
                 if self.weight_decay > 0:
-                    grad += self.weight_decay * p.data
-                self._m[i] = b1 * self._m[i] + (1 - b1) * grad
-                self._v[i] = b2 * self._v[i] + (1 - b2) * grad ** 2
-                m_hat = self._m[i] / (1 - b1 ** self._step_count)
-                v_hat = self._v[i] / (1 - b2 ** self._step_count)
-                p.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+                    grad = grad + self.weight_decay * p.data
+                m, v = self._m[i], self._v[i]
+                m *= b1
+                m += (1 - b1) * grad
+                v *= b2
+                v += (1 - b2) * (grad * grad)
+                # Reuse the denominator buffer instead of retaining m_hat,
+                # v_hat and sqrt(v_hat) at once for every large parameter.
+                denom = np.sqrt(v)
+                denom /= np.sqrt(1 - b2 ** self._step_count)
+                denom += self.eps
+                np.divide(m, denom, out=denom)
+                p.data -= (self.lr / (1 - b1 ** self._step_count)) * denom
 
     def state_dict(self):
         state = super().state_dict()
@@ -105,14 +115,19 @@ class AdamW(Optimizer):
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
-                grad = p.grad.copy()
+                grad = p.grad
                 if self.weight_decay > 0:
-                    p.data -= self.lr * self.weight_decay * p.data
-                self._m[i] = b1 * self._m[i] + (1 - b1) * grad
-                self._v[i] = b2 * self._v[i] + (1 - b2) * grad ** 2
-                m_hat = self._m[i] / (1 - b1 ** self._step_count)
-                v_hat = self._v[i] / (1 - b2 ** self._step_count)
-                p.data -= self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+                    p.data *= 1 - self.lr * self.weight_decay
+                m, v = self._m[i], self._v[i]
+                m *= b1
+                m += (1 - b1) * grad
+                v *= b2
+                v += (1 - b2) * (grad * grad)
+                denom = np.sqrt(v)
+                denom /= np.sqrt(1 - b2 ** self._step_count)
+                denom += self.eps
+                np.divide(m, denom, out=denom)
+                p.data -= (self.lr / (1 - b1 ** self._step_count)) * denom
 
     def state_dict(self):
         state = super().state_dict()
@@ -144,10 +159,11 @@ class RMSprop(Optimizer):
             for i, p in enumerate(self.parameters):
                 if p.grad is None:
                     continue
-                grad = p.grad.copy()
+                grad = p.grad
                 if self.weight_decay > 0:
-                    grad += self.weight_decay * p.data
-                self._sq[i] = self.alpha * self._sq[i] + (1 - self.alpha) * grad ** 2
+                    grad = grad + self.weight_decay * p.data
+                self._sq[i] *= self.alpha
+                self._sq[i] += (1 - self.alpha) * (grad * grad)
                 step = self.lr * grad / (np.sqrt(self._sq[i]) + self.eps)
                 if self.momentum > 0:
                     self._buf[i] = self.momentum * self._buf[i] + step

@@ -1,5 +1,6 @@
 import numpy as np
-from ..tensor import Tensor, no_grad, _Function
+from ..tensor import Tensor, no_grad, is_grad_enabled, _Function
+from ..accelerator import matmul
 from abc import ABC, abstractmethod
 
 
@@ -180,7 +181,7 @@ class Conv2D(Module):
         w_cols = self.weight.data.reshape(self.out_channels, -1)
         out_data = (cols @ w_cols.T).reshape(N, OH, OW, self.out_channels).transpose(0, 3, 1, 2)
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(out_data, requires_grad=True)
             out._ctx = _Conv2DCtx(x, self, cols, N, OH, OW, out_data)
         else:
@@ -194,8 +195,6 @@ class Conv2D(Module):
 class _Conv2DCtx:
     def __init__(self, x, conv, cols, N, OH, OW, output):
         self.inputs = [x, conv.weight]
-        if conv.use_bias:
-            self.inputs.append(conv.bias)
         self.conv = conv
         self.cols = cols
         self.N = N
@@ -219,24 +218,24 @@ class _Conv2DCtx:
             grad_output.transpose(0, 2, 3, 1).reshape(N * OH * OW, -1)
         )
 
-        w_cols = conv.weight.data.reshape(conv.out_channels, -1)
-        grad_cols = grad_out_reshaped @ w_cols
-        grad_w_cols = cols.T @ grad_out_reshaped
-        grad_w = grad_w_cols.T.reshape(conv.weight.shape)
-
-        grad_cols_reshaped = grad_cols.reshape(N, OH, OW, C, KH, KW).transpose(0, 3, 4, 5, 1, 2)
-        grad_x = np.zeros((N, C, H + 2 * PH, W + 2 * PW), dtype=np.float32)
-        for i in range(KH):
-            for j in range(KW):
-                grad_x[:, :, i:i + OH * SH:SH, j:j + OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
-        if PH > 0:
-            grad_x = grad_x[:, :, PH:-PH, :]
-        if PW > 0:
-            grad_x = grad_x[:, :, :, PW:-PW]
+        grad_x = grad_w = None
+        if inputs[0].requires_grad:
+            w_cols = conv.weight.data.reshape(conv.out_channels, -1)
+            grad_cols = grad_out_reshaped @ w_cols
+            grad_cols_reshaped = grad_cols.reshape(N, OH, OW, C, KH, KW).transpose(0, 3, 4, 5, 1, 2)
+            grad_x = np.zeros((N, C, H + 2 * PH, W + 2 * PW), dtype=np.float32)
+            for i in range(KH):
+                for j in range(KW):
+                    grad_x[:, :, i:i + OH * SH:SH, j:j + OW * SW:SW] += grad_cols_reshaped[:, :, i, j, :, :]
+            if PH > 0:
+                grad_x = grad_x[:, :, PH:-PH, :]
+            if PW > 0:
+                grad_x = grad_x[:, :, :, PW:-PW]
+        if inputs[1].requires_grad:
+            grad_w_cols = cols.T @ grad_out_reshaped
+            grad_w = grad_w_cols.T.reshape(conv.weight.shape)
 
         grads = [grad_x, grad_w]
-        if conv.use_bias:
-            grads.append(np.asarray(grad_output.sum(axis=(0, 2, 3))))
         return tuple(grads)
 
 
@@ -308,10 +307,11 @@ class FnBatchNorm(_Function):
             else:
                 mean_r = mean
                 var_r = var
-            with no_grad():
-                running_mean.data = momentum * running_mean.data + (1 - momentum) * mean
-                running_var.data = momentum * running_var.data + (1 - momentum) * var
-            ctx.save_for_backward = (x.data.copy(), gamma.data.copy(), mean, var, axes, ndim)
+            # x and gamma are already retained in ctx.inputs.  Storing copies
+            # here used one extra activation-sized buffer per BatchNorm.  The
+            # running statistics were already updated by forward_raw; updating
+            # them here as well made each training forward count twice.
+            ctx.save_for_backward = (mean, var, axes, ndim)
         else:
             if ndim == 4:
                 rm = running_mean.data.reshape(1, -1, 1, 1)
@@ -326,7 +326,9 @@ class FnBatchNorm(_Function):
         saved = ctx.save_for_backward
         if saved is None:
             return (None, None, None, None, None, None, None, None, None, None)
-        x_data, gamma_data, mean, var, axes, ndim = saved
+        mean, var, axes, ndim = saved
+        x_data = ctx.inputs[0].data
+        gamma_data = ctx.inputs[1].data
         N = x_data.size // mean.size
         if ndim == 4:
             mean_r = mean.reshape(1, -1, 1, 1)
@@ -443,11 +445,12 @@ class FnDropout(_Function):
 
     @staticmethod
     def forward(ctx, t, mask):
-        ctx.save_for_backward = (mask.data.copy(),)
+        # The mask is an input tensor retained by FunctionCtx.
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        (mask,) = ctx.save_for_backward
+        mask = ctx.inputs[1].data
         return (grad_output * mask,)
 
 
@@ -490,11 +493,11 @@ class FnSigmoid(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (1.0 / (1.0 + np.exp(-t.data.copy())),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        (s,) = ctx.save_for_backward
+        s = ctx.output
         return (grad_output * s * (1 - s),)
 
 
@@ -505,11 +508,11 @@ class FnTanh(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (np.tanh(t.data.copy()),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        (t_val,) = ctx.save_for_backward
+        t_val = ctx.output
         return (grad_output * (1 - t_val ** 2),)
 
 
@@ -523,13 +526,10 @@ class FnSoftmax(_Function):
     @staticmethod
     def forward(ctx, t, axis=-1):
         ctx.axis = axis
-        max_val = np.max(t.data, axis=axis, keepdims=True)
-        e_x = np.exp(t.data - max_val)
-        ctx.save_for_backward = (e_x / np.sum(e_x, axis=axis, keepdims=True),)
 
     @staticmethod
     def backward(ctx, grad_output):
-        (s,) = ctx.save_for_backward
+        s = ctx.output
         axis = ctx.axis
         return (s * (grad_output - (s * grad_output).sum(axis=axis, keepdims=True)),)
 
@@ -549,10 +549,11 @@ class DenseReLU(Module):
         return f"in={self.in_features}, out={self.out_features}"
 
     def forward(self, x):
-        out = x @ self.weight
+        out_data = matmul(x.data, self.weight.data)
         if self.use_bias:
-            out = out + self.bias
-        return out._op(FnReLU)
+            out_data = out_data + self.bias.data
+        np.maximum(out_data, 0, out=out_data)
+        return _dense_activation_output(x, self, out_data, "relu")
 
 
 class DenseSigmoid(Module):
@@ -570,10 +571,53 @@ class DenseSigmoid(Module):
         return f"in={self.in_features}, out={self.out_features}"
 
     def forward(self, x):
-        out = x @ self.weight
+        out_data = matmul(x.data, self.weight.data)
         if self.use_bias:
-            out = out + self.bias
-        return out._op(FnSigmoid)
+            out_data = out_data + self.bias.data
+        # Keep the temporary to one buffer and reuse the final output.
+        out_data = 1.0 / (1.0 + np.exp(-out_data))
+        return _dense_activation_output(x, self, out_data, "sigmoid")
+
+
+def _dense_activation_output(x, layer, out_data, activation):
+    """Build a fused dense+activation node without a dense intermediate."""
+    inputs = [x, layer.weight]
+    if layer.use_bias:
+        inputs.append(layer.bias)
+    requires_grad = is_grad_enabled() and any(inp.requires_grad for inp in inputs)
+    out = Tensor(out_data, requires_grad=requires_grad)
+    if requires_grad:
+        out._ctx = _DenseActivationCtx(inputs, out_data, activation)
+    return out
+
+
+class _DenseActivationCtx:
+    def __init__(self, inputs, output, activation):
+        self.inputs = inputs
+        self.output = output
+        self.activation = activation
+        self.needs_input_grad = any(inp.requires_grad for inp in inputs)
+        self.backward_fn = self.backward
+
+    def backward(self, grad_output):
+        x, weight = self.inputs[:2]
+        if self.activation == "relu":
+            grad_output = grad_output * (self.output > 0)
+        else:
+            grad_output = grad_output * self.output * (1.0 - self.output)
+
+        grads = [None, None]
+        if x.requires_grad:
+            grads[0] = matmul(grad_output, weight.data.T)
+        if weight.requires_grad:
+            grads[1] = matmul(
+                x.data.reshape(-1, x.shape[-1]).T,
+                grad_output.reshape(-1, grad_output.shape[-1]),
+            )
+        if len(self.inputs) == 3:
+            grads.append(grad_output.sum(axis=tuple(range(grad_output.ndim - 1)))
+                         if self.inputs[2].requires_grad else None)
+        return tuple(grads)
 
 
 #
@@ -608,7 +652,7 @@ class MaxPool2D(Module):
         windows = windows[:, :, ::SH, ::SW, :, :]
         out_data = windows.max(axis=(-2, -1))
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(out_data, requires_grad=True)
             out._ctx = _MaxPoolCtx(x, self, xd, windows, KH, KW, SH, SW, PH, PW, out_data)
             return out
@@ -686,7 +730,7 @@ class AvgPool2D(Module):
         windows = windows[:, :, ::SH, ::SW, :, :]
         out_data = windows.mean(axis=(-2, -1))
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(out_data, requires_grad=True)
             out._ctx = _AvgPoolCtx(x, self, xd, KH, KW, SH, SW, PH, PW, out_data)
             return out
@@ -749,7 +793,7 @@ class Embedding(Module):
         idx = np.clip(idx, 0, self.num_embeddings - 1)
         out_data = self.weight.data[idx]
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(out_data, requires_grad=True)
             out._ctx = _EmbeddingCtx(self, idx, out_data)
             return out
@@ -800,7 +844,7 @@ class LayerNorm(Module):
         var = x.data.var(axis=reduce_axes, keepdims=True) + self.eps
         x_norm = (x.data - mean) / np.sqrt(var)
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(x_norm, requires_grad=True)
             out._ctx = _LayerNormCtx(x, self, x_norm, mean, var, reduce_axes, x_norm)
             if self.elementwise_affine:
@@ -896,12 +940,11 @@ class Conv2DReLU(Module):
         cols = windows.transpose(0,2,3,1,4,5).reshape(N*OH*OW, C*KH*KW)
         w_cols = self.weight.data.reshape(self.out_channels, -1)
         out_data = (cols @ w_cols.T).reshape(N, OH, OW, self.out_channels).transpose(0,3,1,2)
-        pre_act = out_data.copy()
         out_data = np.maximum(out_data, 0)
 
-        if self.training:
+        if self.training and is_grad_enabled():
             out = Tensor(out_data, requires_grad=True)
-            out._ctx = _Conv2DReLUCtx(x, self, cols, N, OH, OW, pre_act)
+            out._ctx = _Conv2DReLUCtx(x, self, cols, N, OH, OW, out_data)
             if self.use_bias:
                 out = out + self.bias.reshape(1,-1,1,1)
             return out
@@ -912,22 +955,19 @@ class Conv2DReLU(Module):
 
 
 class _Conv2DReLUCtx:
-    def __init__(self, x, conv, cols, N, OH, OW, pre_act):
+    def __init__(self, x, conv, cols, N, OH, OW, output):
         self.inputs = [x, conv.weight]
-        if conv.use_bias:
-            self.inputs.append(conv.bias)
         self.conv = conv
         self.cols = cols
         self.N = N
         self.OH = OH
         self.OW = OW
-        self.pre_act = pre_act
+        self.output = output
         self.needs_input_grad = True
         self.backward_fn = self.backward
 
     def backward(self, grad_output):
-        relu_mask = (self.pre_act > 0).astype(np.float32)
-        grad = grad_output * relu_mask
+        grad = grad_output * (self.output > 0)
         return _Conv2DCtx._backward_impl(self.inputs, self.conv, self.cols, self.N, self.OH, self.OW, grad)
 
 

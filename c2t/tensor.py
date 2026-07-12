@@ -1,8 +1,14 @@
 import numpy as np
 from contextlib import contextmanager
 from typing import List, Optional, Tuple, Union, Callable
+from .accelerator import matmul
 
 _GRAD_ENABLED = True
+
+def is_grad_enabled():
+    """Return whether operations should retain an autograd graph."""
+    return _GRAD_ENABLED
+
 
 @contextmanager
 def no_grad():
@@ -124,6 +130,11 @@ class Tensor:
                     stack.append((inp, 0))
 
         self.grad = np.asarray(gradient, dtype=np.float32)
+        # A graph is single-use by default.  Releasing each processed node is
+        # important on CPU: otherwise every saved activation survives until
+        # Python eventually collects the complete graph after the step.
+        # Parameter tensors are leaves and therefore keep their accumulated
+        # gradients, while intermediate gradients are discarded immediately.
         for node in reversed(topo):
             grad = node.grad
             if grad is None:
@@ -138,6 +149,15 @@ class Tensor:
                         inp.grad = np.asarray(g, dtype=np.float32)
                     else:
                         inp.grad += g
+            if node is not self:
+                node.grad = None
+            node._ctx = None
+
+        # The loss itself is usually tiny, but its context can retain a large
+        # branch of the graph.  Keep its gradient for introspection, not its
+        # graph.  Calling backward twice on the same value is intentionally
+        # unsupported, matching the usual autograd single-use behaviour.
+        self._ctx = None
 
     def __add__(self, other):
         if not isinstance(other, Tensor):
@@ -386,11 +406,14 @@ class FnMul(_Function):
 
     @staticmethod
     def forward(ctx, a, b):
-        ctx.save_for_backward = (a.data.copy(), b.data.copy(), a.shape, b.shape)
+        # FunctionCtx already owns the input tensors.  Copying their data here
+        # doubled every activation kept for the backward pass.
+        ctx.save_for_backward = (a.shape, b.shape)
 
     @staticmethod
     def backward(ctx, grad_output):
-        a_data, b_data, a_shape, b_shape = ctx.save_for_backward
+        a_shape, b_shape = ctx.save_for_backward
+        a_data, b_data = (ctx.inputs[0].data, ctx.inputs[1].data)
         return (_reduce_grad(grad_output * b_data, a_shape),
                 _reduce_grad(grad_output * a_data, b_shape))
 
@@ -400,11 +423,12 @@ class FnDiv(_Function):
 
     @staticmethod
     def forward(ctx, a, b):
-        ctx.save_for_backward = (a.data.copy(), b.data.copy(), a.shape, b.shape)
+        ctx.save_for_backward = (a.shape, b.shape)
 
     @staticmethod
     def backward(ctx, grad_output):
-        a_data, b_data, a_shape, b_shape = ctx.save_for_backward
+        a_shape, b_shape = ctx.save_for_backward
+        a_data, b_data = (ctx.inputs[0].data, ctx.inputs[1].data)
         return (_reduce_grad(grad_output / b_data, a_shape),
                 -_reduce_grad(grad_output * a_data / (b_data ** 2), b_shape))
 
@@ -426,31 +450,38 @@ class FnPow(_Function):
 
     @staticmethod
     def forward(ctx, a, b):
-        ctx.save_for_backward = (a.data.copy(), b.data.copy())
+        # The input tensors are retained by the context, so values need not be
+        # copied solely for backward.
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        a_data, b_data = ctx.save_for_backward
+        a_data, b_data = (ctx.inputs[0].data, ctx.inputs[1].data)
         return (grad_output * b_data * np.power(a_data, b_data - 1),
                 grad_output * np.power(a_data, b_data) * np.log(np.maximum(a_data, 1e-38)))
 
 
 class FnMatMul(_Function):
-    forward_raw = staticmethod(lambda a, b: a.data @ b.data)
+    forward_raw = staticmethod(lambda a, b: matmul(a.data, b.data))
 
     @staticmethod
     def forward(ctx, a, b):
-        ctx.save_for_backward = (a.shape, b.shape, a.data.copy(), b.data.copy())
+        ctx.save_for_backward = (a.shape, b.shape)
 
     @staticmethod
     def backward(ctx, grad_output):
-        a_shape, b_shape, a_data, b_data = ctx.save_for_backward
-        grad_a = grad_output @ np.swapaxes(b_data, -2, -1)
-        grad_b = np.swapaxes(a_data, -2, -1) @ grad_output
-        while grad_a.ndim > len(a_shape):
-            grad_a = grad_a.sum(axis=0)
-        while grad_b.ndim > len(b_shape):
-            grad_b = grad_b.sum(axis=0)
+        a_shape, b_shape = ctx.save_for_backward
+        a, b = ctx.inputs
+        a_data, b_data = a.data, b.data
+        grad_a = grad_b = None
+        if a.requires_grad:
+            grad_a = matmul(grad_output, np.swapaxes(b_data, -2, -1))
+            while grad_a.ndim > len(a_shape):
+                grad_a = grad_a.sum(axis=0)
+        if b.requires_grad:
+            grad_b = matmul(np.swapaxes(a_data, -2, -1), grad_output)
+            while grad_b.ndim > len(b_shape):
+                grad_b = grad_b.sum(axis=0)
         return (grad_a, grad_b)
 
 
@@ -547,11 +578,12 @@ class FnExp(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (np.exp(t.data.copy()),)
+        # ctx.output is the result calculated by forward_raw.
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        return (grad_output * ctx.save_for_backward[0],)
+        return (grad_output * ctx.output,)
 
 
 class FnLog(_Function):
@@ -559,11 +591,11 @@ class FnLog(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (t.data.copy(),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        return (grad_output / ctx.save_for_backward[0],)
+        return (grad_output / ctx.inputs[0].data,)
 
 
 class FnSqrt(_Function):
@@ -571,11 +603,11 @@ class FnSqrt(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (np.sqrt(t.data.copy()),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        return (grad_output / (2 * ctx.save_for_backward[0]),)
+        return (grad_output / (2 * ctx.output),)
 
 
 class FnSquare(_Function):
@@ -583,11 +615,11 @@ class FnSquare(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (t.data.copy(),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        return (grad_output * 2 * ctx.save_for_backward[0],)
+        return (grad_output * 2 * ctx.inputs[0].data,)
 
 
 class FnAbs(_Function):
@@ -595,11 +627,11 @@ class FnAbs(_Function):
 
     @staticmethod
     def forward(ctx, t):
-        ctx.save_for_backward = (t.data.copy(),)
+        pass
 
     @staticmethod
     def backward(ctx, grad_output):
-        return (grad_output * np.sign(ctx.save_for_backward[0]),)
+        return (grad_output * np.sign(ctx.inputs[0].data),)
 
 
 class FnClip(_Function):
@@ -609,12 +641,13 @@ class FnClip(_Function):
 
     @staticmethod
     def forward(ctx, t, min_val, max_val):
-        ctx.save_for_backward = (t.data.copy(), min_val, max_val)
+        ctx.min_val = min_val
+        ctx.max_val = max_val
 
     @staticmethod
     def backward(ctx, grad_output):
-        data, min_val, max_val = ctx.save_for_backward
-        mask = (data >= min_val) & (data <= max_val)
+        data = ctx.inputs[0].data
+        mask = (data >= ctx.min_val) & (data <= ctx.max_val)
         return (grad_output * mask,)
 
 
@@ -675,12 +708,11 @@ class FnLogSumExp(_Function):
     def forward(ctx, t, axis=-1, keepdims=True):
         ctx.axis = axis
         ctx.keepdims = keepdims
-        max_val = np.max(t.data, axis=axis, keepdims=True)
-        ctx.save_for_backward = (t.data.copy(), max_val)
 
     @staticmethod
     def backward(ctx, grad_output):
-        data, max_val = ctx.save_for_backward
+        data = ctx.inputs[0].data
+        max_val = np.max(data, axis=ctx.axis, keepdims=True)
         axis = ctx.axis
         keepdims = ctx.keepdims
         exp_stable = np.exp(data - max_val)
@@ -715,11 +747,11 @@ class _CatContext:
         self.output = output
         self.backward_fn = self.backward
         self.needs_input_grad = any(t.requires_grad for t in tensors)
-        self.saved_tensors = ([t.data.copy() for t in tensors], axis)
+        self.saved_tensors = ([t.shape for t in tensors], axis)
 
     def backward(self, grad_output):
-        data_list, axis = self.saved_tensors
-        grads = np.split(grad_output, np.cumsum([d.shape[axis] for d in data_list[:-1]]), axis=axis)
+        shapes, axis = self.saved_tensors
+        grads = np.split(grad_output, np.cumsum([shape[axis] for shape in shapes[:-1]]), axis=axis)
         return tuple(grads)
 
 
@@ -743,8 +775,8 @@ class _StackContext:
         self.output = output
         self.backward_fn = self.backward
         self.needs_input_grad = any(t.requires_grad for t in tensors)
-        self.saved_tensors = ([t.data.copy() for t in tensors], axis)
+        self.saved_tensors = axis
 
     def backward(self, grad_output):
-        _, axis = self.saved_tensors
+        axis = self.saved_tensors
         return tuple(np.squeeze(g, axis=axis) for g in np.split(grad_output, len(self.inputs), axis=axis))

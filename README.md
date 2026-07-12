@@ -2,7 +2,7 @@
 
 # 2C2T.DRT
 
-*Train neural networks on CPU. No GPU. No budget. No bullshit.*
+*Train neural networks efficiently on CPU, with optional OpenCL integrated-GPU acceleration.*
 
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -16,7 +16,7 @@
 
 GPUs needed for deep learning have become unaffordable. An RTX 3060 costs **500 €+** when available. RTX 4090s at **2500 €+** are perpetually out of stock. Training AI models has become a luxury.
 
-**2C2T.DRT breaks this lock.** A 100% CPU framework, zero GPU dependencies, it lets you train real neural networks on any computer. No graphics card needed. No expensive cloud. No 32 GB of VRAM required.
+**2C2T.DRT breaks this lock.** Its CPU/OpenBLAS path trains real neural networks on any computer with no GPU dependency. When OpenCL is available, it can also use an integrated GPU for large Dense matrix multiplications. No expensive cloud or 32 GB of VRAM required.
 
 ---
 
@@ -87,11 +87,14 @@ predictions = trainer.predict(x_test)
 # MNIST (or synthetic data if offline)
 python main.py
 
-# Large model with memory sharding
-python main.py --model large --shard --shard-size 200
+# Large model: small micro-batches, one effective large batch
+python main.py --model large --batch-size 8 --grad-accum 4
 
-# Long training run
-python main.py --model deep --epochs 100 --lr 0.0005 --grad-accum 4
+# Deep Sequential model: activation checkpointing saves RAM
+python main.py --model deep --batch-size 8 --grad-accum 4 --checkpoint --checkpoint-segments 6
+
+# Use an integrated GPU when an OpenCL runtime is installed; otherwise CPU fallback
+python main.py --device auto
 
 # Evaluation only
 python main.py --model cnn --eval-only --load model.npz
@@ -138,10 +141,10 @@ python benchmark.py
 | Technique | Description | Benefit |
 |-----------|-------------|---------|
 | **Gradient accumulation** | Accumulate gradients over N micro-batches | Simulate larger batches without extra RAM |
-| **Gradient checkpointing** | Recomputed activations on backward | Trade time for memory (50% less RAM) |
+| **Gradient checkpointing** | Recompute Sequential segments on backward | Keeps only segment boundaries; trades CPU time for activation RAM |
 | **Memory sharding** | Split model, load/unload from disk | Models larger than RAM |
 | **Quantization 8/16-bit** | Weight compression | Up to 4× less RAM/storage |
-| **Auto-batch** | Compute optimal batch size | Avoid MemoryError |
+| **Auto-batch** | Probe the real autograd graph | Avoids input-size-only estimates |
 
 ### Training
 
@@ -165,12 +168,49 @@ python benchmark.py
 
 ---
 
+## Memory-efficient training
+
+Training RAM is driven mostly by the autograd graph, not the `.npz` size of
+the model. The framework now releases each intermediate graph node during its
+backward pass, avoids duplicate copies of tensors already owned by autograd,
+and uses genuinely fused `DenseReLU`/`DenseSigmoid` layers.
+
+For a constrained machine, start with a micro-batch that fits comfortably and
+raise `--grad-accum` to preserve the effective batch size. For example,
+`--batch-size 8 --grad-accum 4` gives gradients equivalent to a batch of 32,
+including a correctly weighted final short batch. Add `--checkpoint` only when
+activation RAM is the limiting factor: it recomputes each Sequential segment
+during backward, so it is slower but its gradients, Dropout masks and
+BatchNorm running statistics match normal training.
+
+`--auto-batch` runs a one-sample graph probe rather than estimating from the
+input tensor alone. Its result is conservative because Adam needs parameter,
+gradient and two moment buffers.
+
+## Optional integrated GPU acceleration
+
+The default `--device auto` keeps NumPy/OpenBLAS on CPU if no supported runtime
+is present. With an OpenCL driver and the optional `pyopencl` package, it
+selects an available GPU (preferring unified-memory / integrated GPUs) and
+offloads sufficiently large 2-D Dense matrix multiplications in forward and
+backward. Small GEMMs, convolution and unsupported shapes remain on CPU, where
+transfer overhead would make GPU execution slower.
+
+```bash
+pip install pyopencl        # optional: requires the system GPU OpenCL driver
+python main.py --device auto
+python main.py --device opencl   # fail clearly instead of falling back
+```
+
 ## Known limitations (honestly)
 
 - **No miracle**: expect 15-30× slower than an entry-level GPU
 - **RAM bound**: model size limited by available RAM (not VRAM)
 - **No 100B+ training**: backward pass activations must fit in RAM. Streaming only works for inference.
 - **No "custom" kernels**: numpy/OpenBLAS are already assembly-optimized. Our matmuls will never beat theirs.
+- **GPU path scope**: OpenCL acceleration is deliberately restricted to large
+  2-D Dense GEMMs. It is an optional accelerator, not a replacement for a
+  full CUDA/PyTorch stack.
 
 ### When to use it
 
